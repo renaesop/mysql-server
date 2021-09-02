@@ -44,10 +44,13 @@
 
 Commit_order_manager::Commit_order_manager(uint32 worker_numbers)
     : m_workers(worker_numbers) {
+  mysql_mutex_init(key_commit_order_manager_mutex, &m_mutex, NULL);
   unset_rollback_status();
 }
 
-Commit_order_manager::~Commit_order_manager() = default;
+Commit_order_manager::~Commit_order_manager() {
+  mysql_mutex_destroy(&m_mutex);
+}
 
 void Commit_order_manager::init_worker_context(Slave_worker &worker) {
   this->m_workers[worker.id].m_mdl_context = &worker.info_thd->mdl_context;
@@ -84,7 +87,8 @@ bool Commit_order_manager::wait_on_graph(Slave_worker *worker) {
   this->m_workers[worker->id].m_stage =
       cs::apply::Commit_order_queue::enum_worker_stage::FINISHED_APPLYING;
 
-  if (this->m_workers.front() != worker->id) {
+  auto m_worker_front = this->m_workers.front();
+  if (m_worker_front != worker->id) {
     if (worker->found_commit_order_deadlock()) {
       /* purecov: begin inspected */
       rollback_status = true;
@@ -267,12 +271,14 @@ void Commit_order_manager::finish_one(Slave_worker *worker) {
     assert(this->m_workers.front() == worker->id);
     assert(!this->m_workers.is_empty());
 
-    auto this_seq_nr{0};
+    cs::apply::Commit_order_queue::sequence_type this_seq_nr{0};
     auto this_worker{cs::apply::Commit_order_queue::NO_WORKER};
+
     std::tie(this_worker, this_seq_nr) = this->m_workers.pop();
-    auto next_seq_nr = this_seq_nr + 1;
+    cs::apply::Commit_order_queue::sequence_type next_seq_nr = this_seq_nr + 1;
     assert(worker->id == this_worker);
 
+    mysql_mutex_lock(&m_mutex);
     auto next_worker = this->m_workers.front();
     if (next_worker !=
             cs::apply::Commit_order_queue::NO_WORKER &&  // There is a worker to
@@ -290,6 +296,7 @@ void Commit_order_manager::finish_one(Slave_worker *worker) {
           MDL_wait::GRANTED);
       this->m_workers[next_worker].unfreeze_commit_sequence_nr(next_seq_nr);
     }
+    mysql_mutex_unlock(&m_mutex);
 
     this->m_workers[this_worker].m_mdl_context->m_wait.reset_status();
     this->m_workers[this_worker].m_stage =

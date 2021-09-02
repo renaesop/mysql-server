@@ -290,6 +290,8 @@ class Commit_order_manager {
   /* It stores order commit order information of all workers. */
   cs::apply::Commit_order_queue m_workers;
 
+  mysql_mutex_t m_mutex;  // mutex for the jobs queue
+
   /**
     Flush record of transactions for all the waiting threads and then
     awake them from their wait. It also calls gtid_state->update_commit_group()
